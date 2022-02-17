@@ -138,7 +138,7 @@ bool rLoadController::loadSetStateGPIO(bool new_state, bool forced, bool publish
 
 bool rLoadController::loadSetState(bool new_state, bool publish)
 {
-  return loadSetStateGPIO(new_state, false, publish);
+  return loadSetStateGPIO(new_state, true, publish);
 }
 
 
