@@ -3,33 +3,46 @@
 #include "reNvs.h"
 #include "reEvents.h"
 #include "reMqtt.h"
+#include "reEsp32.h"
 #include "rLog.h"
 #include "rStrings.h"
+#include "def_sntp.h"
 
 static const char* logTAG = "LOAD";
 
-#define ERR_LOAD_CHECK(err, str) if (err != ESP_OK) rlog_e(logTAG, "%s: #%d %s", str, err, esp_err_to_name(err));
+#define ERR_LOAD_CHECK(err, str) if (err != ESP_OK) { rlog_e(logTAG, "%s: #%d %s", str, err, esp_err_to_name(err)); return false; };
 #define ERR_GPIO_SET_LEVEL "Failed to change GPIO level"
 #define ERR_GPIO_SET_MODE "Failed to set GPIO mode"
 
 // -----------------------------------------------------------------------------------------------------------------------
-// ----------------------------------------------------- Constructor -----------------------------------------------------
+// -----------------------------------------------------------------------------------------------------------------------
+// --------------------------------------------------- rLoadController ---------------------------------------------------
+// -----------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------
 
-rLoadController::rLoadController(uint8_t gpio_num, bool gpio_on, const char* nvs_space)
+rLoadController::rLoadController(uint8_t pin, bool level_on, bool use_pullup, const char* nvs_space,
+  cb_load_change_t cb_gpio_before, cb_load_change_t cb_gpio_after, cb_load_change_t cb_state_changed,
+  cb_load_publish_t cb_mqtt_publish)
 {
   // Configure GPIO
-  _gpio_num = gpio_num;
-  _gpio_on = gpio_on;
+  _pin = pin;
+  _level_on = level_on;
+  _use_pullup = use_pullup;
   _nvs_space = nvs_space;
   _state = false;
   _last_on = 0;
   _last_off = 0;
 
-  // Reset pointers
+   // Reset pointers
   _period_start = nullptr;
   _mqtt_topic = nullptr;
   _mqtt_publish = nullptr;
+
+  // Callbacks
+  _gpio_before = cb_gpio_before;
+  _gpio_after = cb_gpio_after;
+  _state_changed = cb_state_changed;
+  _mqtt_publish = cb_mqtt_publish;
 
   // Clear counters
   countersReset();
@@ -50,52 +63,36 @@ void rLoadController::setPeriodStartDay(uint8_t* mday)
   _period_start = mday;
 }
 
-void rLoadController::setCallbackGPIO(cb_load_control_t cb_before, cb_load_control_t cb_after)
+void rLoadController::setCallbacks(cb_load_change_t cb_gpio_before, cb_load_change_t cb_gpio_after, cb_load_change_t cb_state_changed)
 {
-  _gpio_before = cb_before;
-  _gpio_after = cb_after;
-}
-
-void rLoadController::setCallbackState(cb_load_control_t cb_state)
-{
-  _load_state = cb_state;
+  _gpio_before = cb_gpio_before;
+  _gpio_after = cb_gpio_after;
+  _state_changed = cb_state_changed;
 }
 
 // -----------------------------------------------------------------------------------------------------------------------
 // --------------------------------------------------------- Load --------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------
 
-bool rLoadController::loadInitGPIO(bool init_state)
+bool rLoadController::loadInit(bool init_state)
 {
-  // Configure GPIO to output
-  gpio_pad_select_gpio((gpio_num_t)_gpio_num);
-  ERR_LOAD_CHECK(gpio_set_direction((gpio_num_t)_gpio_num, GPIO_MODE_OUTPUT), ERR_GPIO_SET_MODE);
-  if (_gpio_on) {
-    ERR_LOAD_CHECK(gpio_set_pull_mode((gpio_num_t)_gpio_num, GPIO_PULLDOWN_ONLY), ERR_GPIO_SET_MODE);
-  } else {
-    ERR_LOAD_CHECK(gpio_set_pull_mode((gpio_num_t)_gpio_num, GPIO_PULLUP_ONLY), ERR_GPIO_SET_MODE);
-  };
-  return loadSetStateGPIO(init_state, true, true);
+  return loadInitGPIO() && loadSetState(init_state, true, false);
 }
 
-bool rLoadController::loadSetStateGPIO(bool new_state, bool forced, bool publish)
+bool rLoadController::loadSetState(bool new_state, bool forced, bool publish)
 {
   if (forced || (_state != new_state)) {
     // Determine which level needs to be written to the GPIO
-    uint32_t new_level = 0;
-    if (new_state) {
-      _gpio_on ? new_level = 1 : new_level = 0;
-    } else {
-      _gpio_on ? new_level = 0 : new_level = 1;
-    };
+    bool phy_level;
+    new_state ? phy_level = _level_on : phy_level = !_level_on;
 
     // Set physical level to GPIO
-    if (_gpio_before) { _gpio_before(this, new_state); };
-    ERR_LOAD_CHECK(gpio_set_level((gpio_num_t)_gpio_num, new_level), ERR_GPIO_SET_LEVEL);
-    if (_gpio_after) { _gpio_after(this, new_state); };
+    if (_gpio_before) { _gpio_before(this, phy_level, 0); };
+    bool change_ok = loadSetStateGPIO(phy_level);
+    if (_gpio_after) { _gpio_after(this, phy_level, 0); };
 
     // If the change level was successful
-    if (_state != new_state) {
+    if (change_ok && (_state != new_state)) {
       _state = new_state;
       if (_state) {
         _last_on = time(nullptr);
@@ -106,41 +103,44 @@ bool rLoadController::loadSetStateGPIO(bool new_state, bool forced, bool publish
         _counters.cntMonthCurr++;
         _counters.cntPeriodCurr++;
         _counters.cntYearCurr++;
-        rlog_i(logTAG, "Load on GPIO %d is ON", _gpio_num);
+        rlog_i(logTAG, "Load on GPIO %d is ON", _pin);
       } else {
         _last_off = time(nullptr);
         if (((_last_on <= 1000000000) && (_last_off <= 1000000000)) || ((_last_on > 1000000000) && (_last_off > 1000000000))) {
-          _durations.durLast = _last_off - _last_on;
-          _durations.durTotal = _durations.durTotal + _durations.durLast;
-          _durations.durToday = _durations.durToday + _durations.durLast;
-          _durations.durWeekCurr = _durations.durWeekCurr + _durations.durLast;
-          _durations.durMonthCurr = _durations.durMonthCurr + _durations.durLast;
-          _durations.durPeriodCurr = _durations.durPeriodCurr + _durations.durLast;
-          _durations.durYearCurr = _durations.durYearCurr + _durations.durLast;
+          // Сrutch: timezone correction 
+          // When the first time stamp occurred before the zone was applied, and the second after it, and a negative time interval is obtained
+          if (_last_on > _last_off) {
+            if ((_last_on - _last_off) < CONFIG_SNTP_TIMEZONE_SECONDS) {
+              _last_off =+ CONFIG_SNTP_TIMEZONE_SECONDS;
+            };
+          };
+          if (_last_on < _last_off) {
+            _durations.durLast = _last_off - _last_on;
+            _durations.durTotal = _durations.durTotal + _durations.durLast;
+            _durations.durToday = _durations.durToday + _durations.durLast;
+            _durations.durWeekCurr = _durations.durWeekCurr + _durations.durLast;
+            _durations.durMonthCurr = _durations.durMonthCurr + _durations.durLast;
+            _durations.durPeriodCurr = _durations.durPeriodCurr + _durations.durLast;
+            _durations.durYearCurr = _durations.durYearCurr + _durations.durLast;
+          };
         };
-        rlog_i(logTAG, "Load on GPIO %d is OFF", _gpio_num);
+        rlog_i(logTAG, "Load on GPIO %d is OFF", _pin);
       };
 
       // Publish status and counters
       if (publish) {
-        mqttPublish(true);
+        mqttPublish(forced);
       };
 
       // Call external callback
-      if (_load_state) { 
-        _load_state(this, _state); 
+      if (_state_changed) { 
+        _state_changed(this, _state, _durations.durLast); 
       };
       return true;
     };
   };
   return false;
 }
-
-bool rLoadController::loadSetState(bool new_state, bool publish)
-{
-  return loadSetStateGPIO(new_state, true, publish);
-}
-
 
 // -----------------------------------------------------------------------------------------------------------------------
 // ------------------------------------------------------ Get data -------------------------------------------------------
@@ -301,34 +301,42 @@ void rLoadController::countersNvsRestore()
   if (_nvs_space) {
     char* nmsp_cnt = malloc_stringf("%s.cnt", _nvs_space);
     if (nmsp_cnt) {
-      nvsRead(nmsp_cnt, CONFIG_LOADCTRL_TOTAL, OPT_TYPE_U32, &_counters.cntTotal);
-      nvsRead(nmsp_cnt, CONFIG_LOADCTRL_TODAY, OPT_TYPE_U32, &_counters.cntToday);
-      nvsRead(nmsp_cnt, CONFIG_LOADCTRL_YESTERDAY, OPT_TYPE_U32, &_counters.cntYesterday);
-      nvsRead(nmsp_cnt, CONFIG_LOADCTRL_WEEK_CURR, OPT_TYPE_U32, &_counters.cntWeekCurr);
-      nvsRead(nmsp_cnt, CONFIG_LOADCTRL_WEEK_PREV, OPT_TYPE_U32, &_counters.cntWeekPrev);
-      nvsRead(nmsp_cnt, CONFIG_LOADCTRL_MONTH_CURR, OPT_TYPE_U32, &_counters.cntMonthCurr);
-      nvsRead(nmsp_cnt, CONFIG_LOADCTRL_MONTH_PREV, OPT_TYPE_U32, &_counters.cntMonthPrev);
-      nvsRead(nmsp_cnt, CONFIG_LOADCTRL_PERIOD_CURR, OPT_TYPE_U32, &_counters.cntPeriodCurr);
-      nvsRead(nmsp_cnt, CONFIG_LOADCTRL_PERIOD_PREV, OPT_TYPE_U32, &_counters.cntPeriodPrev);
-      nvsRead(nmsp_cnt, CONFIG_LOADCTRL_YEAR_CURR, OPT_TYPE_U32, &_counters.cntYearCurr);
-      nvsRead(nmsp_cnt, CONFIG_LOADCTRL_YEAR_PREV, OPT_TYPE_U32, &_counters.cntYearPrev);
+      nvs_handle_t nvs_handle;
+      if (nvsOpen(nmsp_cnt, NVS_READONLY, &nvs_handle)) {
+        nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_TOTAL, &_counters.cntTotal);
+        nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_TODAY, &_counters.cntToday);
+        nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_YESTERDAY, &_counters.cntYesterday);
+        nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_WEEK_CURR, &_counters.cntWeekCurr);
+        nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_WEEK_PREV, &_counters.cntWeekPrev);
+        nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_MONTH_CURR, &_counters.cntMonthCurr);
+        nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_MONTH_PREV, &_counters.cntMonthPrev);
+        nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_PERIOD_CURR, &_counters.cntPeriodCurr);
+        nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_PERIOD_PREV, &_counters.cntPeriodPrev);
+        nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_YEAR_CURR, &_counters.cntYearCurr);
+        nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_YEAR_PREV, &_counters.cntYearPrev);
+        nvs_close(nvs_handle);
+      };
       free(nmsp_cnt);
     };
 
     char* nmsp_dur = malloc_stringf("%s.dur", _nvs_space);
     if (nmsp_dur) {
-      nvsRead(nmsp_dur, CONFIG_LOADCTRL_LAST, OPT_TYPE_U32, &_durations.durLast);
-      nvsRead(nmsp_dur, CONFIG_LOADCTRL_TOTAL, OPT_TYPE_U32, &_durations.durTotal);
-      nvsRead(nmsp_dur, CONFIG_LOADCTRL_TODAY, OPT_TYPE_U32, &_durations.durToday);
-      nvsRead(nmsp_dur, CONFIG_LOADCTRL_YESTERDAY, OPT_TYPE_U32, &_durations.durYesterday);
-      nvsRead(nmsp_dur, CONFIG_LOADCTRL_WEEK_CURR, OPT_TYPE_U32, &_durations.durWeekCurr);
-      nvsRead(nmsp_dur, CONFIG_LOADCTRL_WEEK_PREV, OPT_TYPE_U32, &_durations.durWeekPrev);
-      nvsRead(nmsp_dur, CONFIG_LOADCTRL_MONTH_CURR, OPT_TYPE_U32, &_durations.durMonthCurr);
-      nvsRead(nmsp_dur, CONFIG_LOADCTRL_MONTH_PREV, OPT_TYPE_U32, &_durations.durMonthPrev);
-      nvsRead(nmsp_dur, CONFIG_LOADCTRL_PERIOD_CURR, OPT_TYPE_U32, &_durations.durPeriodCurr);
-      nvsRead(nmsp_dur, CONFIG_LOADCTRL_PERIOD_PREV, OPT_TYPE_U32, &_durations.durPeriodPrev);
-      nvsRead(nmsp_dur, CONFIG_LOADCTRL_YEAR_CURR, OPT_TYPE_U32, &_durations.durYearCurr);
-      nvsRead(nmsp_dur, CONFIG_LOADCTRL_YEAR_PREV, OPT_TYPE_U32, &_durations.durYearPrev);
+      nvs_handle_t nvs_handle;
+      if (nvsOpen(nmsp_cnt, NVS_READONLY, &nvs_handle)) {
+          nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_LAST, &_durations.durLast);
+          nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_TOTAL, &_durations.durTotal);
+          nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_TODAY, &_durations.durToday);
+          nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_YESTERDAY, &_durations.durYesterday);
+          nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_WEEK_CURR, &_durations.durWeekCurr);
+          nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_WEEK_PREV, &_durations.durWeekPrev);
+          nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_MONTH_CURR, &_durations.durMonthCurr);
+          nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_MONTH_PREV, &_durations.durMonthPrev);
+          nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_PERIOD_CURR, &_durations.durPeriodCurr);
+          nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_PERIOD_PREV, &_durations.durPeriodPrev);
+          nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_YEAR_CURR, &_durations.durYearCurr);
+          nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_YEAR_PREV, &_durations.durYearPrev);
+        nvs_close(nvs_handle);
+      };
       free(nmsp_dur);
     };
   };
@@ -336,37 +344,47 @@ void rLoadController::countersNvsRestore()
 
 void rLoadController::countersNvsStore()
 {
-  if (_nvs_space) {
+  if (_nvs_space && (_counters.cntTotal > 0)) {
     char* nmsp_cnt = malloc_stringf("%s.cnt", _nvs_space);
     if (nmsp_cnt) {
-      nvsWrite(nmsp_cnt, CONFIG_LOADCTRL_TOTAL, OPT_TYPE_U32, &_counters.cntTotal);
-      nvsWrite(nmsp_cnt, CONFIG_LOADCTRL_TODAY, OPT_TYPE_U32, &_counters.cntToday);
-      nvsWrite(nmsp_cnt, CONFIG_LOADCTRL_YESTERDAY, OPT_TYPE_U32, &_counters.cntYesterday);
-      nvsWrite(nmsp_cnt, CONFIG_LOADCTRL_WEEK_CURR, OPT_TYPE_U32, &_counters.cntWeekCurr);
-      nvsWrite(nmsp_cnt, CONFIG_LOADCTRL_WEEK_PREV, OPT_TYPE_U32, &_counters.cntWeekPrev);
-      nvsWrite(nmsp_cnt, CONFIG_LOADCTRL_MONTH_CURR, OPT_TYPE_U32, &_counters.cntMonthCurr);
-      nvsWrite(nmsp_cnt, CONFIG_LOADCTRL_MONTH_PREV, OPT_TYPE_U32, &_counters.cntMonthPrev);
-      nvsWrite(nmsp_cnt, CONFIG_LOADCTRL_PERIOD_CURR, OPT_TYPE_U32, &_counters.cntPeriodCurr);
-      nvsWrite(nmsp_cnt, CONFIG_LOADCTRL_PERIOD_PREV, OPT_TYPE_U32, &_counters.cntPeriodPrev);
-      nvsWrite(nmsp_cnt, CONFIG_LOADCTRL_YEAR_CURR, OPT_TYPE_U32, &_counters.cntYearCurr);
-      nvsWrite(nmsp_cnt, CONFIG_LOADCTRL_YEAR_PREV, OPT_TYPE_U32, &_counters.cntYearPrev);
+      nvs_handle_t nvs_handle;
+      if (nvsOpen(nmsp_cnt, NVS_READWRITE, &nvs_handle)) {
+        nvs_set_u32(nvs_handle, CONFIG_LOADCTRL_TOTAL, _counters.cntTotal);
+        nvs_set_u32(nvs_handle, CONFIG_LOADCTRL_TODAY, _counters.cntToday);
+        nvs_set_u32(nvs_handle, CONFIG_LOADCTRL_YESTERDAY, _counters.cntYesterday);
+        nvs_set_u32(nvs_handle, CONFIG_LOADCTRL_WEEK_CURR, _counters.cntWeekCurr);
+        nvs_set_u32(nvs_handle, CONFIG_LOADCTRL_WEEK_PREV, _counters.cntWeekPrev);
+        nvs_set_u32(nvs_handle, CONFIG_LOADCTRL_MONTH_CURR, _counters.cntMonthCurr);
+        nvs_set_u32(nvs_handle, CONFIG_LOADCTRL_MONTH_PREV, _counters.cntMonthPrev);
+        nvs_set_u32(nvs_handle, CONFIG_LOADCTRL_PERIOD_CURR, _counters.cntPeriodCurr);
+        nvs_set_u32(nvs_handle, CONFIG_LOADCTRL_PERIOD_PREV, _counters.cntPeriodPrev);
+        nvs_set_u32(nvs_handle, CONFIG_LOADCTRL_YEAR_CURR, _counters.cntYearCurr);
+        nvs_set_u32(nvs_handle, CONFIG_LOADCTRL_YEAR_PREV, _counters.cntYearPrev);
+        nvs_commit(nvs_handle);
+        nvs_close(nvs_handle);
+      };
       free(nmsp_cnt);
     };
 
     char* nmsp_dur = malloc_stringf("%s.dur", _nvs_space);
     if (nmsp_dur) {
-      nvsWrite(nmsp_dur, CONFIG_LOADCTRL_LAST, OPT_TYPE_U32, &_durations.durLast);
-      nvsWrite(nmsp_dur, CONFIG_LOADCTRL_TOTAL, OPT_TYPE_U32, &_durations.durTotal);
-      nvsWrite(nmsp_dur, CONFIG_LOADCTRL_TODAY, OPT_TYPE_U32, &_durations.durToday);
-      nvsWrite(nmsp_dur, CONFIG_LOADCTRL_YESTERDAY, OPT_TYPE_U32, &_durations.durYesterday);
-      nvsWrite(nmsp_dur, CONFIG_LOADCTRL_WEEK_CURR, OPT_TYPE_U32, &_durations.durWeekCurr);
-      nvsWrite(nmsp_dur, CONFIG_LOADCTRL_WEEK_PREV, OPT_TYPE_U32, &_durations.durWeekPrev);
-      nvsWrite(nmsp_dur, CONFIG_LOADCTRL_MONTH_CURR, OPT_TYPE_U32, &_durations.durMonthCurr);
-      nvsWrite(nmsp_dur, CONFIG_LOADCTRL_MONTH_PREV, OPT_TYPE_U32, &_durations.durMonthPrev);
-      nvsWrite(nmsp_dur, CONFIG_LOADCTRL_PERIOD_CURR, OPT_TYPE_U32, &_durations.durPeriodCurr);
-      nvsWrite(nmsp_dur, CONFIG_LOADCTRL_PERIOD_PREV, OPT_TYPE_U32, &_durations.durPeriodPrev);
-      nvsWrite(nmsp_dur, CONFIG_LOADCTRL_YEAR_CURR, OPT_TYPE_U32, &_durations.durYearCurr);
-      nvsWrite(nmsp_dur, CONFIG_LOADCTRL_YEAR_PREV, OPT_TYPE_U32, &_durations.durYearPrev);
+      nvs_handle_t nvs_handle;
+      if (nvsOpen(nmsp_cnt, NVS_READWRITE, &nvs_handle)) {
+        nvs_set_u32(nvs_handle, CONFIG_LOADCTRL_LAST, _durations.durLast);
+        nvs_set_u32(nvs_handle, CONFIG_LOADCTRL_TOTAL, _durations.durTotal);
+        nvs_set_u32(nvs_handle, CONFIG_LOADCTRL_TODAY, _durations.durToday);
+        nvs_set_u32(nvs_handle, CONFIG_LOADCTRL_YESTERDAY, _durations.durYesterday);
+        nvs_set_u32(nvs_handle, CONFIG_LOADCTRL_WEEK_CURR, _durations.durWeekCurr);
+        nvs_set_u32(nvs_handle, CONFIG_LOADCTRL_WEEK_PREV, _durations.durWeekPrev);
+        nvs_set_u32(nvs_handle, CONFIG_LOADCTRL_MONTH_CURR, _durations.durMonthCurr);
+        nvs_set_u32(nvs_handle, CONFIG_LOADCTRL_MONTH_PREV, _durations.durMonthPrev);
+        nvs_set_u32(nvs_handle, CONFIG_LOADCTRL_PERIOD_CURR, _durations.durPeriodCurr);
+        nvs_set_u32(nvs_handle, CONFIG_LOADCTRL_PERIOD_PREV, _durations.durPeriodPrev);
+        nvs_set_u32(nvs_handle, CONFIG_LOADCTRL_YEAR_CURR, _durations.durYearCurr);
+        nvs_set_u32(nvs_handle, CONFIG_LOADCTRL_YEAR_PREV, _durations.durYearPrev);
+        nvs_commit(nvs_handle);
+        nvs_close(nvs_handle);
+      };
       free(nmsp_dur);
     };
   };
@@ -419,3 +437,85 @@ void rLoadController::countersTimeEventHandler(int32_t event_id, void* event_dat
     _durations.durYearCurr  = 0;
   };
 }
+
+// -----------------------------------------------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------------------------------------------------
+// ------------------------------------------------- rLoadGpioController -------------------------------------------------
+// -----------------------------------------------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------------------------------------------------
+
+rLoadGpioController::rLoadGpioController(uint8_t pin, bool level_on, bool use_pullup, const char* nvs_space,
+  cb_load_change_t cb_gpio_before, cb_load_change_t cb_gpio_after, cb_load_change_t cb_state_changed, 
+  cb_load_publish_t cb_mqtt_publish)
+:rLoadController(pin, level_on, use_pullup, nvs_space, 
+  cb_gpio_before, cb_gpio_after, cb_state_changed, cb_mqtt_publish)
+{
+}
+
+rLoadGpioController::rLoadGpioController(uint8_t pin, bool level_on, bool use_pullup, const char* nvs_space)
+:rLoadController(pin, level_on, use_pullup, nvs_space, nullptr, nullptr, nullptr, nullptr)
+{
+}
+
+bool rLoadGpioController::loadInitGPIO()
+{
+  // Configure internal GPIO to output
+  gpio_pad_select_gpio((gpio_num_t)_pin);
+  ERR_LOAD_CHECK(gpio_set_direction((gpio_num_t)_pin, GPIO_MODE_OUTPUT), ERR_GPIO_SET_MODE);
+  if (_use_pullup) {
+    if (_level_on) {
+      ERR_LOAD_CHECK(gpio_set_pull_mode((gpio_num_t)_pin, GPIO_PULLDOWN_ONLY), ERR_GPIO_SET_MODE);
+    } else {
+      ERR_LOAD_CHECK(gpio_set_pull_mode((gpio_num_t)_pin, GPIO_PULLUP_ONLY), ERR_GPIO_SET_MODE);
+    };
+  };
+  return true;
+}
+
+bool rLoadGpioController::loadSetStateGPIO(bool physical_level)
+{
+  ERR_LOAD_CHECK(gpio_set_level((gpio_num_t)_pin, (uint32_t)physical_level), ERR_GPIO_SET_LEVEL);
+  return true;
+}
+
+// -----------------------------------------------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------------------------------------------------
+// ------------------------------------------------- rLoadIoExpController ------------------------------------------------
+// -----------------------------------------------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------------------------------------------------
+
+rLoadIoExpController::rLoadIoExpController(uint8_t pin, bool level_on, bool use_pullup, const char* nvs_space,
+  cb_load_gpio_init_t cb_gpio_init, cb_load_gpio_change_t cb_gpio_change,
+  cb_load_change_t cb_gpio_before, cb_load_change_t cb_gpio_after, cb_load_change_t cb_state_changed, 
+  cb_load_publish_t cb_mqtt_publish)
+:rLoadController(pin, level_on, use_pullup, nvs_space, 
+  cb_gpio_before, cb_gpio_after, cb_state_changed, cb_mqtt_publish)
+{
+  _gpio_init = cb_gpio_init;
+  _gpio_change = cb_gpio_change;
+}
+
+rLoadIoExpController::rLoadIoExpController(uint8_t pin, bool level_on, bool use_pullup, const char* nvs_space,
+  cb_load_gpio_init_t cb_gpio_init, cb_load_gpio_change_t cb_gpio_change)
+:rLoadController(pin, level_on, use_pullup, nvs_space, nullptr, nullptr, nullptr, nullptr)
+{
+  _gpio_init = cb_gpio_init;
+  _gpio_change = cb_gpio_change;
+}
+
+bool rLoadIoExpController::loadInitGPIO()
+{
+  if (_gpio_init) {
+    return _gpio_init(this, _pin, _level_on, _use_pullup);
+  };
+  return true;
+}
+
+bool rLoadIoExpController::loadSetStateGPIO(bool physical_level)
+{
+  if (_gpio_change) {
+    return _gpio_change(this, _pin, physical_level);
+  };
+  return false;
+}
+
