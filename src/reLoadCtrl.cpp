@@ -412,8 +412,6 @@ void rLoadController::countersTimeEventHandler(int32_t event_id, void* event_dat
         _durations.durPeriodCurr = 0;
       };
     };
-
-    countersNvsStore();
   }
   // Beginning of the week
   else if (event_id == RE_TIME_START_OF_WEEK) {
