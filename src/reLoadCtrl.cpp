@@ -37,6 +37,7 @@ rLoadController::rLoadController(uint8_t pin, bool level_on, bool use_pullup, co
   _period_start = nullptr;
   _mqtt_topic = nullptr;
   _mqtt_publish = nullptr;
+  _timer_on = nullptr;
 
   // Callbacks
   _gpio_before = cb_gpio_before;
@@ -50,6 +51,7 @@ rLoadController::rLoadController(uint8_t pin, bool level_on, bool use_pullup, co
 
 rLoadController::~rLoadController()
 {
+  timerStop();
   if (_mqtt_topic) free(_mqtt_topic);
   _mqtt_topic = nullptr;
 }
@@ -106,6 +108,8 @@ bool rLoadController::loadSetState(bool new_state, bool forced, bool publish)
         rlog_i(logTAG, "Load on GPIO %d is ON", _pin);
       } else {
         _last_off = time(nullptr);
+        timerStop();
+        // Calculate turn-on duration
         if (((_last_on <= 1000000000) && (_last_off <= 1000000000)) || ((_last_on > 1000000000) && (_last_off > 1000000000))) {
           // Сrutch: timezone correction 
           // When the first time stamp occurred before the zone was applied, and the second after it, and a negative time interval is obtained
@@ -129,7 +133,7 @@ bool rLoadController::loadSetState(bool new_state, bool forced, bool publish)
 
       // Publish status and counters
       if (publish) {
-        mqttPublish(forced);
+        mqttPublish();
       };
 
       // Call external callback
@@ -140,6 +144,61 @@ bool rLoadController::loadSetState(bool new_state, bool forced, bool publish)
     };
   };
   return false;
+}
+
+// -----------------------------------------------------------------------------------------------------------------------
+// -------------------------------------------------------- Timer --------------------------------------------------------
+// -----------------------------------------------------------------------------------------------------------------------
+
+static void loadControllerTimerEnd(void* arg)
+{
+  if (arg) {
+    rLoadController* ctrl = (rLoadController*)arg;
+    ctrl->loadSetState(false, false, true);
+  };
+}
+
+bool rLoadController::loadSetTimer(uint32_t duration_ms)
+{
+  if (_timer_on == nullptr) {
+    esp_timer_create_args_t cfg;
+    memset(&cfg, 0, sizeof(esp_timer_create_args_t));
+    cfg.name = "load_ctrl";
+    cfg.callback = loadControllerTimerEnd;
+    cfg.arg = this;
+    RE_OK_CHECK(esp_timer_create(&cfg, &_timer_on), return false);
+  };
+  if (_timer_on != nullptr) {
+    if (esp_timer_is_active(_timer_on)) {
+      esp_timer_stop(_timer_on);
+    };
+    RE_OK_CHECK(esp_timer_start_once(_timer_on, duration_ms*1000), return false);
+    if (loadSetState(true, false, true)) {
+      return true;
+    } else {
+      esp_timer_stop(_timer_on);
+      esp_timer_delete(_timer_on);
+      _timer_on = nullptr;
+    };
+  };
+  return false;
+}
+
+bool rLoadController::timerIsActive()
+{
+  return (_timer_on != nullptr) && esp_timer_is_active(_timer_on);
+}
+
+bool rLoadController::timerStop()
+{
+  if (_timer_on != nullptr) {
+    if (esp_timer_is_active(_timer_on)) {
+      esp_timer_stop(_timer_on);
+    };
+    RE_OK_CHECK(esp_timer_delete(_timer_on), return false);
+    _timer_on = nullptr;
+  };
+  return true;
 }
 
 // -----------------------------------------------------------------------------------------------------------------------
@@ -203,10 +262,10 @@ void rLoadController::mqttTopicFree()
   _mqtt_topic = nullptr;
 }
 
-bool rLoadController::mqttPublish(bool forced)
+bool rLoadController::mqttPublish()
 {
   if ((_mqtt_topic) && (_mqtt_publish)) {
-    return _mqtt_publish(this, _mqtt_topic, getJSON(), forced, false, true);
+    return _mqtt_publish(this, _mqtt_topic, getJSON(), false, true);
   };
   return false;
 }
@@ -299,45 +358,222 @@ void rLoadController::countersReset()
 void rLoadController::countersNvsRestore()
 {
   if (_nvs_space) {
+    // Number of days since UNIX epoch, discarding time
+    uint32_t daysNow = (uint32_t)(time(nullptr) / 86400);
+    uint32_t daysNvs = daysNow;
+    nvs_handle_t nvs_handle;
+    if (nvsOpen(_nvs_space, NVS_READONLY, &nvs_handle)) {
+      nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_DAYS, &daysNvs);
+      nvs_close(nvs_handle);
+    };
+
+    re_load_counters_t _nvsCnt;
+    bool _nvsCntEnabled = false;
     char* nmsp_cnt = malloc_stringf("%s.cnt", _nvs_space);
     if (nmsp_cnt) {
       nvs_handle_t nvs_handle;
       if (nvsOpen(nmsp_cnt, NVS_READONLY, &nvs_handle)) {
-        nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_TOTAL, &_counters.cntTotal);
-        nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_TODAY, &_counters.cntToday);
-        nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_YESTERDAY, &_counters.cntYesterday);
-        nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_WEEK_CURR, &_counters.cntWeekCurr);
-        nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_WEEK_PREV, &_counters.cntWeekPrev);
-        nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_MONTH_CURR, &_counters.cntMonthCurr);
-        nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_MONTH_PREV, &_counters.cntMonthPrev);
-        nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_PERIOD_CURR, &_counters.cntPeriodCurr);
-        nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_PERIOD_PREV, &_counters.cntPeriodPrev);
-        nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_YEAR_CURR, &_counters.cntYearCurr);
-        nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_YEAR_PREV, &_counters.cntYearPrev);
+        _nvsCntEnabled = true;
+        nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_TOTAL, &_nvsCnt.cntTotal);
+        nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_TODAY, &_nvsCnt.cntToday);
+        nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_YESTERDAY, &_nvsCnt.cntYesterday);
+        nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_WEEK_CURR, &_nvsCnt.cntWeekCurr);
+        nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_WEEK_PREV, &_nvsCnt.cntWeekPrev);
+        nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_MONTH_CURR, &_nvsCnt.cntMonthCurr);
+        nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_MONTH_PREV, &_nvsCnt.cntMonthPrev);
+        nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_PERIOD_CURR, &_nvsCnt.cntPeriodCurr);
+        nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_PERIOD_PREV, &_nvsCnt.cntPeriodPrev);
+        nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_YEAR_CURR, &_nvsCnt.cntYearCurr);
+        nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_YEAR_PREV, &_nvsCnt.cntYearPrev);
         nvs_close(nvs_handle);
       };
       free(nmsp_cnt);
     };
 
+    re_load_durations_t _nvsDur;
+    bool _nvsDurEnabled = false;
     char* nmsp_dur = malloc_stringf("%s.dur", _nvs_space);
     if (nmsp_dur) {
       nvs_handle_t nvs_handle;
-      if (nvsOpen(nmsp_cnt, NVS_READONLY, &nvs_handle)) {
-          nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_LAST, &_durations.durLast);
-          nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_TOTAL, &_durations.durTotal);
-          nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_TODAY, &_durations.durToday);
-          nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_YESTERDAY, &_durations.durYesterday);
-          nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_WEEK_CURR, &_durations.durWeekCurr);
-          nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_WEEK_PREV, &_durations.durWeekPrev);
-          nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_MONTH_CURR, &_durations.durMonthCurr);
-          nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_MONTH_PREV, &_durations.durMonthPrev);
-          nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_PERIOD_CURR, &_durations.durPeriodCurr);
-          nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_PERIOD_PREV, &_durations.durPeriodPrev);
-          nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_YEAR_CURR, &_durations.durYearCurr);
-          nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_YEAR_PREV, &_durations.durYearPrev);
+      if (nvsOpen(nmsp_dur, NVS_READONLY, &nvs_handle)) {
+        _nvsDurEnabled = true;
+        nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_LAST, &_nvsDur.durLast);
+        nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_TOTAL, &_nvsDur.durTotal);
+        nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_TODAY, &_nvsDur.durToday);
+        nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_YESTERDAY, &_nvsDur.durYesterday);
+        nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_WEEK_CURR, &_nvsDur.durWeekCurr);
+        nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_WEEK_PREV, &_nvsDur.durWeekPrev);
+        nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_MONTH_CURR, &_nvsDur.durMonthCurr);
+        nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_MONTH_PREV, &_nvsDur.durMonthPrev);
+        nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_PERIOD_CURR, &_nvsDur.durPeriodCurr);
+        nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_PERIOD_PREV, &_nvsDur.durPeriodPrev);
+        nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_YEAR_CURR, &_nvsDur.durYearCurr);
+        nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_YEAR_PREV, &_nvsDur.durYearPrev);
         nvs_close(nvs_handle);
       };
       free(nmsp_dur);
+    };
+
+    // Restore data
+    if (daysNow == daysNvs) {
+      // Data was saved today
+      if (_nvsCntEnabled) {
+        _counters = _nvsCnt;
+      };
+      if (_nvsDurEnabled) {
+        _durations = _nvsDur;
+      };
+    } else {
+      // Restore total counters
+      if (_nvsCntEnabled) {
+        _counters.cntTotal  = _nvsCnt.cntTotal;
+      };
+      if (_nvsDurEnabled) {
+        _durations.durLast = _nvsDur.durLast;
+        _durations.durTotal = _nvsDur.durTotal;
+      };
+
+      // Decode week, month, period, and year
+      time_t timeNow = (time_t)daysNow * 86400 + 1;
+      time_t timeNvs = (time_t)daysNvs * 86400 + 1;
+      uint32_t weekNow = (daysNow + 3) / 7;
+      uint32_t weekNvs = (daysNvs + 3) / 7;
+      struct tm tmNow;
+      struct tm tmNvs;
+      localtime_r(&timeNow, &tmNow);
+      localtime_r(&timeNvs, &tmNvs);
+      uint8_t pmNow = 0;
+      uint8_t pmNvs = 0;
+      uint16_t pyNow = 0;
+      uint16_t pyNvs = 0;
+      if ((_period_start) && (*_period_start > 0)) {
+        pyNow = tmNow.tm_year;
+        if (tmNow.tm_mday < *_period_start) {
+          pmNow = tmNow.tm_mon;
+        } else {
+          pmNow = tmNow.tm_mon + 1;
+          if (pmNow > 11) {
+            pyNow++;
+            pmNow = 0;
+          };
+        };
+        pyNvs = tmNvs.tm_year;
+        if (tmNvs.tm_mday < *_period_start) {
+          pmNvs = tmNvs.tm_mon;
+        } else {
+          pmNvs = tmNvs.tm_mon + 1;
+          if (pmNvs > 11) {
+            pyNvs++;
+            pmNvs = 0;
+          };
+        };
+      };
+
+      // Data was saved on the previous day
+      if (daysNow == daysNvs + 1) {
+        if (_nvsCntEnabled) {
+          _counters.cntToday = 0;
+          _counters.cntYesterday = _nvsCnt.cntToday;
+        };
+        if (_nvsDurEnabled) {
+          _durations.durToday = 0;
+          _durations.durYesterday = _nvsDur.durToday;
+        };
+      };
+
+      // Data was saved on the current week
+      if (weekNow == weekNvs) {
+        if (_nvsCntEnabled) {
+          _counters.cntWeekCurr = _nvsCnt.cntWeekCurr;
+          _counters.cntWeekPrev = _nvsCnt.cntWeekPrev;
+        };
+        if (_nvsDurEnabled) {
+          _durations.durWeekCurr = _nvsDur.durWeekCurr;
+          _durations.durWeekPrev = _nvsDur.durWeekPrev;
+        };
+      }
+      // Data was saved on the previous week
+      else if (weekNow == weekNvs + 1) {
+        if (_nvsCntEnabled) {
+          _counters.cntWeekCurr = 0;
+          _counters.cntWeekPrev = _nvsCnt.cntWeekCurr;
+        };
+        if (_nvsDurEnabled) {
+          _durations.durWeekCurr = 0;
+          _durations.durWeekPrev = _nvsDur.durWeekCurr;
+        };
+      };
+
+      // Data was saved on the current month
+      if ((tmNow.tm_year == tmNvs.tm_year) && (tmNow.tm_mon == tmNvs.tm_mon)) {
+        if (_nvsCntEnabled) {
+          _counters.cntMonthCurr = _nvsCnt.cntMonthCurr;
+          _counters.cntMonthPrev = _nvsCnt.cntMonthPrev;
+        };
+        if (_nvsDurEnabled) {
+          _durations.durMonthCurr = _nvsDur.durMonthCurr;
+          _durations.durMonthPrev = _nvsDur.durMonthPrev;
+        };
+      }
+      // Data was saved on the previous month
+      else if (((tmNow.tm_year == tmNvs.tm_year) && (tmNow.tm_mon == tmNvs.tm_mon + 1)) 
+            || ((tmNow.tm_year == tmNvs.tm_year + 1) && (tmNow.tm_mon == 0) && (tmNvs.tm_mon == 11))) {
+        if (_nvsCntEnabled) {
+          _counters.cntMonthCurr = 0;
+          _counters.cntMonthPrev = _nvsCnt.cntMonthCurr;
+        };
+        if (_nvsDurEnabled) {
+          _durations.durMonthCurr = 0;
+          _durations.durMonthPrev = _nvsDur.durMonthCurr;
+        };
+      };
+
+      // Data was saved on the current period
+      if ((pyNow == pyNvs) && (pmNow == pmNvs)) {
+        if (_nvsCntEnabled) {
+          _counters.cntPeriodCurr = _nvsCnt.cntPeriodCurr;
+          _counters.cntPeriodPrev = _nvsCnt.cntPeriodPrev;
+        };
+        if (_nvsDurEnabled) {
+          _durations.durPeriodCurr = _nvsDur.durPeriodCurr;
+          _durations.durPeriodPrev = _nvsDur.durPeriodPrev;
+        };
+      }
+      // Data was saved on the previous period
+      else if (((pyNow == pyNvs) && (pmNow == pmNvs + 1)) 
+            || ((pyNow == pyNvs + 1) && (pmNow == 0) && (pmNvs == 11))) {
+        if (_nvsCntEnabled) {
+          _counters.cntPeriodCurr = 0;
+          _counters.cntPeriodPrev = _nvsCnt.cntPeriodCurr;
+        };
+        if (_nvsDurEnabled) {
+          _durations.durPeriodCurr = 0;
+          _durations.durPeriodPrev = _nvsDur.durPeriodCurr;
+        };
+      };
+
+      // Data was saved on the current year
+      if (tmNow.tm_year == tmNvs.tm_year) {
+        if (_nvsCntEnabled) {
+          _counters.cntYearCurr = _nvsCnt.cntYearCurr;
+          _counters.cntYearPrev = _nvsCnt.cntYearPrev;
+        };
+        if (_nvsDurEnabled) {
+          _durations.durYearCurr = _nvsDur.durYearCurr;
+          _durations.durYearPrev = _nvsDur.durYearPrev;
+        };
+      } 
+      // Data was saved on the previous year
+      else if (tmNow.tm_year == tmNvs.tm_year + 1) {
+        if (_nvsCntEnabled) {
+          _counters.cntYearCurr = 0;
+          _counters.cntYearPrev = _nvsCnt.cntYearCurr;
+        };
+        if (_nvsDurEnabled) {
+          _durations.durYearCurr = 0;
+          _durations.durYearPrev = _nvsDur.durYearCurr;
+        };
+      };
     };
   };
 }
@@ -345,6 +581,15 @@ void rLoadController::countersNvsRestore()
 void rLoadController::countersNvsStore()
 {
   if (_nvs_space && (_counters.cntTotal > 0)) {
+    nvs_handle_t nvs_handle;
+    if (nvsOpen(_nvs_space, NVS_READWRITE, &nvs_handle)) {
+      // Number of days since UNIX epoch, discarding time
+      uint32_t days = (uint32_t)(time(nullptr) / 86400);
+      nvs_set_u32(nvs_handle, CONFIG_LOADCTRL_DAYS, days);
+      nvs_commit(nvs_handle);
+      nvs_close(nvs_handle);
+    };
+
     char* nmsp_cnt = malloc_stringf("%s.cnt", _nvs_space);
     if (nmsp_cnt) {
       nvs_handle_t nvs_handle;
@@ -369,7 +614,7 @@ void rLoadController::countersNvsStore()
     char* nmsp_dur = malloc_stringf("%s.dur", _nvs_space);
     if (nmsp_dur) {
       nvs_handle_t nvs_handle;
-      if (nvsOpen(nmsp_cnt, NVS_READWRITE, &nvs_handle)) {
+      if (nvsOpen(nmsp_dur, NVS_READWRITE, &nvs_handle)) {
         nvs_set_u32(nvs_handle, CONFIG_LOADCTRL_LAST, _durations.durLast);
         nvs_set_u32(nvs_handle, CONFIG_LOADCTRL_TOTAL, _durations.durTotal);
         nvs_set_u32(nvs_handle, CONFIG_LOADCTRL_TODAY, _durations.durToday);

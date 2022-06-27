@@ -18,6 +18,7 @@
 #include <driver/gpio.h>
 #include "project_config.h"
 #include "def_consts.h"
+#include "esp_timer.h"
 
 typedef struct {
   uint32_t cntTotal       = 0;
@@ -52,7 +53,7 @@ typedef struct {
 
 class rLoadController;
 
-typedef bool (*cb_load_publish_t) (rLoadController *ctrl, char* topic, char* payload, bool forced, bool free_topic, bool free_payload);
+typedef bool (*cb_load_publish_t) (rLoadController *ctrl, char* topic, char* payload, bool free_topic, bool free_payload);
 typedef void (*cb_load_change_t) (rLoadController *ctrl, bool state, time_t duration);
 typedef bool (*cb_load_gpio_init_t) (rLoadController *ctrl, uint8_t pin, bool level_on, bool use_pullup);
 typedef bool (*cb_load_gpio_change_t) (rLoadController *ctrl, uint8_t pin, bool physical_level);
@@ -72,6 +73,11 @@ class rLoadController {
     bool loadInit(bool init_value);
     bool loadSetState(bool new_state, bool forced, bool publish);
 
+    // Timer turn-on
+    bool loadSetTimer(uint32_t duration_ms);
+    bool timerIsActive();
+    bool timerStop();
+
     // Get current data
     bool getState();
     time_t getLastDuration();
@@ -89,7 +95,7 @@ class rLoadController {
     bool mqttTopicSet(char* topic);
     bool mqttTopicCreate(bool primary, bool local, const char* topic1, const char* topic2, const char* topic3);
     void mqttTopicFree();
-    bool mqttPublish(bool forced);
+    bool mqttPublish();
     
     // Saving the state of counters
     void countersReset();
@@ -118,6 +124,7 @@ class rLoadController {
     re_load_durations_t _durations;             // Load operating time counters
     const char* _nvs_space = nullptr;           // Namespace to store counter values 
     char*       _mqtt_topic = nullptr;          // MQTT topic
+    esp_timer_handle_t _timer_on = nullptr;     // Turn-on timer for a specified interval
 
     cb_load_change_t _gpio_before = nullptr;    // Pointer to the callback function to be called before set physical level to GPIO
     cb_load_change_t _gpio_after = nullptr;     // Pointer to the callback function to be called after set physical level to GPIO
