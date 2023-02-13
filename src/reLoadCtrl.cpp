@@ -703,7 +703,7 @@ rLoadGpioController::rLoadGpioController(uint8_t pin, bool level_on, bool use_pu
 bool rLoadGpioController::loadInitGPIO()
 {
   // Configure internal GPIO to output
-  gpio_pad_select_gpio((gpio_num_t)_pin);
+  gpio_reset_pin((gpio_num_t)_pin);
   ERR_LOAD_CHECK(gpio_set_direction((gpio_num_t)_pin, GPIO_MODE_OUTPUT), ERR_GPIO_SET_MODE);
   if (_use_pullup) {
     if (_level_on) {
