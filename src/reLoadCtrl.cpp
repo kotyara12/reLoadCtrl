@@ -276,25 +276,11 @@ bool rLoadController::mqttPublish()
 
 char* rLoadController::getTimestampsJSON()
 {
-  struct tm _ti_on;
   char _time_on[CONFIG_LOADCTRL_TIMESTAMP_BUF_SIZE];
-  memset(&_time_on, 0, sizeof(_time_on));
-  if (_last_on > 0) {
-    localtime_r(&_last_on, &_ti_on);
-    strftime(_time_on, sizeof(_time_on), CONFIG_LOADCTRL_TIMESTAMP_FORMAT, &_ti_on);
-  } else {
-    strcpy(_time_on, CONFIG_FORMAT_EMPTY_DATETIME);
-  };
-
-  struct tm _ti_off;
   char _time_off[CONFIG_LOADCTRL_TIMESTAMP_BUF_SIZE];
-  memset(&_time_off, 0, sizeof(_time_off));
-  if (_last_off > 0) {
-    localtime_r(&_last_off, &_ti_off);
-    strftime(_time_off, sizeof(_time_off), CONFIG_LOADCTRL_TIMESTAMP_FORMAT, &_ti_off);
-  } else {
-    strcpy(_time_off, CONFIG_FORMAT_EMPTY_DATETIME);
-  };
+
+  time2str_empty( CONFIG_LOADCTRL_TIMESTAMP_FORMAT, &_last_on, &_time_on[0], sizeof(_time_on));
+  time2str_empty( CONFIG_LOADCTRL_TIMESTAMP_FORMAT, &_last_off, &_time_off[0], sizeof(_time_off));
 
   return malloc_stringf("{\"" CONFIG_LOADCTRL_ON "\":\"%s\",\"" CONFIG_LOADCTRL_OFF "\":\"%s\"}", _time_on, _time_off);
 }
