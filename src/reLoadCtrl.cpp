@@ -173,7 +173,7 @@ bool rLoadController::loadSetTimer(uint32_t duration_ms)
       esp_timer_stop(_timer_on);
     };
     RE_OK_CHECK(esp_timer_start_once(_timer_on, duration_ms*1000), return false);
-    if (loadSetState(true, false, true)) {
+    if (getState() || loadSetState(true, false, true)) {
       return true;
     } else {
       esp_timer_stop(_timer_on);
