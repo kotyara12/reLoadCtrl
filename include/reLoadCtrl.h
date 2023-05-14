@@ -2,7 +2,7 @@
    EN: Class for controlling a load (e.g. a relay) with calculation of operating time and energy consumption
    RU: Класс для управления нагрузкой (например реле) с подсчетом времени работы и потребляемой энергии
    --------------------------
-   (с) 2021 Разживин Александр | Razzhivin Alexander
+   (с) 2021-2023 Разживин Александр | Razzhivin Alexander
    kotyara12@yandex.ru | https://kotyara12.ru | tg: @kotyara1971
    --------------------------
    Страница проекта: https://github.com/kotyara12/reLoadCtrl
