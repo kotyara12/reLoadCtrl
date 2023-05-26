@@ -208,6 +208,16 @@ bool rLoadController::getState()
   return _state;
 }
 
+time_t rLoadController::getLastOn()
+{
+  return _last_on;
+}
+
+time_t rLoadController::getLastOff()
+{
+  return _last_off;
+}
+
 time_t rLoadController::getLastDuration()
 {
   return _durations.durLast;

@@ -80,6 +80,8 @@ class rLoadController {
 
     // Get current data
     bool getState();
+    time_t getLastOn();
+    time_t getLastOff();
     time_t getLastDuration();
     char*  getLastDurationStr();
     re_load_counters_t getCounters();
