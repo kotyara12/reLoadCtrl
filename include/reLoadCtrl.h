@@ -19,6 +19,7 @@
 #include "project_config.h"
 #include "def_consts.h"
 #include "esp_timer.h"
+#include "rTypes.h"
 
 typedef struct {
   uint32_t cntTotal       = 0;
@@ -64,7 +65,8 @@ extern "C" {
 
 class rLoadController {
   public:
-    rLoadController(uint8_t pin, bool level_on, bool use_pullup, const char* nvs_space,
+    rLoadController(uint8_t pin, bool level_on, bool use_pullup, bool use_timer, const char* nvs_space,
+      uint32_t* cycle_duration, uint32_t* cycle_interval, timeintv_t cycle_type,
       cb_load_change_t cb_gpio_before, cb_load_change_t cb_gpio_after, cb_load_change_t cb_state_changed, 
       cb_load_publish_t cb_mqtt_publish);
     ~rLoadController();
@@ -73,10 +75,11 @@ class rLoadController {
     bool loadInit(bool init_value);
     bool loadSetState(bool new_state, bool forced, bool publish);
 
-    // Timer turn-on
-    bool loadSetTimer(uint32_t duration_ms);
+    // Timers
     bool timerIsActive();
     bool timerStop();
+    bool loadSetTimer(uint32_t duration_ms);
+    bool cycleToggle();
 
     // Get current data
     bool getState();
@@ -122,24 +125,40 @@ class rLoadController {
     time_t      _last_on = 0;                   // The last time the load was turned on
     time_t      _last_off = 0;                  // Time of last load disconnection
     uint8_t*    _period_start = nullptr;        // Day of month at the beginning of the billing period (for example, sending meter readings)
+    uint32_t*   _cycle_duration = nullptr;      // If this value is set, the load will turn on not constantly, but with pulses with a given duration
+    uint32_t*   _cycle_interval = nullptr;      // If this value is set, the load will turn on not constantly, but with pulses with a given interval
+    timeintv_t  _cycle_type = TI_MILLISECONDS;  // Dimensions of cycle time intervals
+    bool        _cycle_state = false;           // Current cycle state
     re_load_counters_t  _counters;              // Counters of the number of load switching
     re_load_durations_t _durations;             // Load operating time counters
     const char* _nvs_space = nullptr;           // Namespace to store counter values 
     char*       _mqtt_topic = nullptr;          // MQTT topic
-    esp_timer_handle_t _timer_on = nullptr;     // Turn-on timer for a specified interval
+    esp_timer_handle_t _timer_on = nullptr;     // General timer for switching on the load for a specified time interval
+    esp_timer_handle_t _timer_cycle = nullptr;  // Timer for cyclic load switching
+    bool        _timer_free = true;             // Delete the stop timer after the specified time interval has elapsed
 
     cb_load_change_t _gpio_before = nullptr;    // Pointer to the callback function to be called before set physical level to GPIO
     cb_load_change_t _gpio_after = nullptr;     // Pointer to the callback function to be called after set physical level to GPIO
     cb_load_change_t _state_changed = nullptr;  // Pointer to the callback function to be called after load switching
     cb_load_publish_t _mqtt_publish = nullptr;  // Pointer to the publish callback function
+
+    bool loadSetStatePriv(bool new_state);
+    
+    bool cycleCreate();
+    bool cycleFree();
+    bool cycleSetCyclePriv(bool new_state);
+
+    bool timerCreate();
+    bool timerFree();
 };
 
 class rLoadGpioController: public rLoadController {
   public:
-    rLoadGpioController(uint8_t pin, bool level_on, bool use_pullup, const char* nvs_space,
+    rLoadGpioController(uint8_t pin, bool level_on, bool use_pullup, bool use_timer, const char* nvs_space,
+      uint32_t* cycle_duration, uint32_t* cycle_interval, timeintv_t cycle_type,
       cb_load_change_t cb_gpio_before, cb_load_change_t cb_gpio_after, cb_load_change_t cb_state_changed, 
       cb_load_publish_t cb_mqtt_publish);
-    rLoadGpioController(uint8_t pin, bool level_on, bool use_pullup, const char* nvs_space);
+    rLoadGpioController(uint8_t pin, bool level_on, bool use_pullup, bool use_timer, const char* nvs_space);
   protected:
     bool loadInitGPIO() override;
     bool loadSetStateGPIO(bool physical_level) override; 
@@ -147,11 +166,12 @@ class rLoadGpioController: public rLoadController {
 
 class rLoadIoExpController: public rLoadController {
   public:
-    rLoadIoExpController(uint8_t pin, bool level_on, bool use_pullup, const char* nvs_space,
+    rLoadIoExpController(uint8_t pin, bool level_on, bool use_pullup, bool use_timer, const char* nvs_space,
+      uint32_t* cycle_duration, uint32_t* cycle_interval, timeintv_t cycle_type,
       cb_load_gpio_init_t cb_gpio_init, cb_load_gpio_change_t cb_gpio_change,
       cb_load_change_t cb_gpio_before, cb_load_change_t cb_gpio_after, cb_load_change_t cb_state_changed, 
       cb_load_publish_t cb_mqtt_publish);
-    rLoadIoExpController(uint8_t pin, bool level_on, bool use_pullup, const char* nvs_space,
+    rLoadIoExpController(uint8_t pin, bool level_on, bool use_pullup, bool use_timer, const char* nvs_space,
       cb_load_gpio_init_t cb_gpio_init, cb_load_gpio_change_t cb_gpio_change);
   protected:
     bool loadInitGPIO() override;

@@ -18,7 +18,8 @@ static const char* logTAG = "LOAD";
 // --------------------------------------------------- rLoadController ---------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------
 
-rLoadController::rLoadController(uint8_t pin, bool level_on, bool use_pullup, const char* nvs_space,
+rLoadController::rLoadController(uint8_t pin, bool level_on, bool use_pullup, bool use_timer, const char* nvs_space,
+  uint32_t* cycle_duration, uint32_t* cycle_interval, timeintv_t cycle_type,
   cb_load_change_t cb_gpio_before, cb_load_change_t cb_gpio_after, cb_load_change_t cb_state_changed,
   cb_load_publish_t cb_mqtt_publish)
 {
@@ -30,12 +31,17 @@ rLoadController::rLoadController(uint8_t pin, bool level_on, bool use_pullup, co
   _state = false;
   _last_on = 0;
   _last_off = 0;
+  _cycle_duration = cycle_duration;
+  _cycle_interval = cycle_interval;
+  _cycle_type = cycle_type;
 
    // Reset pointers
   _period_start = nullptr;
   _mqtt_topic = nullptr;
   _mqtt_publish = nullptr;
   _timer_on = nullptr;
+  _timer_free = !use_timer;
+  _timer_cycle = nullptr;
 
   // Callbacks
   _gpio_before = cb_gpio_before;
@@ -45,11 +51,17 @@ rLoadController::rLoadController(uint8_t pin, bool level_on, bool use_pullup, co
 
   // Clear counters
   countersReset();
+
+  // Create timer
+  if (use_timer) {
+    timerCreate();
+  };
 }
 
 rLoadController::~rLoadController()
 {
-  timerStop();
+  cycleFree();
+  timerFree();
   if (_mqtt_topic) free(_mqtt_topic);
   _mqtt_topic = nullptr;
 }
@@ -79,17 +91,31 @@ bool rLoadController::loadInit(bool init_state)
   return loadInitGPIO() && loadSetState(init_state, true, false);
 }
 
+bool rLoadController::loadSetStatePriv(bool new_state)
+{
+  bool phy_level = new_state ? _level_on : !_level_on;
+  if (_gpio_before) { 
+    _gpio_before(this, phy_level, 0); 
+  };
+  bool ret = loadSetStateGPIO(phy_level);
+  if (_gpio_after) { 
+    _gpio_after(this, phy_level, 0); 
+  };
+  return ret;
+}
+
 bool rLoadController::loadSetState(bool new_state, bool forced, bool publish)
 {
   if (forced || (_state != new_state)) {
-    // Determine which level needs to be written to the GPIO
-    bool phy_level;
-    new_state ? phy_level = _level_on : phy_level = !_level_on;
-
-    // Set physical level to GPIO
-    if (_gpio_before) { _gpio_before(this, phy_level, 0); };
-    bool change_ok = loadSetStateGPIO(phy_level);
-    if (_gpio_after) { _gpio_after(this, phy_level, 0); };
+    bool change_ok = false;
+    if ((_cycle_duration) && (*_cycle_duration > 0) && (_cycle_interval) && (*_cycle_interval > 0)) {
+      // Activate cycle timer
+      change_ok = cycleSetCyclePriv(new_state);
+    } else {
+      // Set physical level to GPIO
+      cycleFree();
+      change_ok = loadSetStatePriv(new_state);
+    };
 
     // If the change level was successful
     if (change_ok && (_state != new_state)) {
@@ -145,6 +171,104 @@ bool rLoadController::loadSetState(bool new_state, bool forced, bool publish)
 }
 
 // -----------------------------------------------------------------------------------------------------------------------
+// -------------------------------------------------------- Cycle --------------------------------------------------------
+// -----------------------------------------------------------------------------------------------------------------------
+
+static void loadControllerCycleEnd(void* arg)
+{
+  if (arg) {
+    rLoadController* ctrl = (rLoadController*)arg;
+    ctrl->cycleToggle();
+  };
+}
+
+bool rLoadController::cycleCreate()
+{
+  if (_timer_cycle == nullptr) {
+    esp_timer_create_args_t cfg;
+    memset(&cfg, 0, sizeof(esp_timer_create_args_t));
+    cfg.name = "load_ctrl_cycle";
+    cfg.callback = loadControllerCycleEnd;
+    cfg.arg = this;
+    RE_OK_CHECK(esp_timer_create(&cfg, &_timer_cycle), return false);
+  };
+  return true;
+}
+
+bool rLoadController::cycleFree()
+{
+  if (_timer_cycle != nullptr) {
+    if (esp_timer_is_active(_timer_cycle)) {
+      esp_timer_stop(_timer_cycle);
+    };
+    if (_timer_free) {
+      _timer_cycle = nullptr;
+    };
+  };
+  return true;
+}
+
+bool rLoadController::cycleToggle()
+{
+  if (_timer_cycle && _cycle_duration && _cycle_interval) {
+    // Stop timer if active
+    if (esp_timer_is_active(_timer_cycle)) {
+      esp_timer_stop(_timer_cycle);
+    };
+    // Switching the load
+    bool new_state = !_cycle_state;
+    if (loadSetStatePriv(new_state)) {
+      // Calculate timer duration
+      uint64_t duration = 1000 * (uint64_t)(new_state ? *_cycle_duration : *_cycle_interval);
+      switch (_cycle_type) {
+        case TI_SECONDS:
+          duration = duration * 1000;
+          break;
+        case TI_MINUTES:
+          duration = duration * 1000 * 60;
+          break;
+        case TI_HOURS:
+          duration = duration * 1000 * 60 * 60;
+          break;
+        case TI_DAYS:
+          duration = duration * 1000 * 60 * 60 * 24;
+          break;
+        default:
+          break;
+      }
+      // Starting the timer
+      if (duration > 0) {
+        if (esp_timer_start_once(_timer_cycle, duration) == ESP_OK) {
+          _cycle_state = new_state;
+          return true;
+        } else {
+          loadSetStatePriv(_cycle_state);
+          return false;
+        };
+      } else {
+        _cycle_state = new_state;
+        return true;
+      };
+    };
+  };
+  return false;
+}
+
+bool rLoadController::cycleSetCyclePriv(bool new_state)
+{
+  _cycle_state = false;
+  if (new_state) {
+    if (cycleCreate()) {
+      return cycleToggle();
+    };
+  } else {
+    cycleFree();
+    return loadSetStatePriv(_cycle_state);
+  };
+  return false;
+}
+
+// -----------------------------------------------------------------------------------------------------------------------
 // -------------------------------------------------------- Timer --------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------
 
@@ -158,14 +282,7 @@ static void loadControllerTimerEnd(void* arg)
 
 bool rLoadController::loadSetTimer(uint32_t duration_ms)
 {
-  if (_timer_on == nullptr) {
-    esp_timer_create_args_t cfg;
-    memset(&cfg, 0, sizeof(esp_timer_create_args_t));
-    cfg.name = "load_ctrl";
-    cfg.callback = loadControllerTimerEnd;
-    cfg.arg = this;
-    RE_OK_CHECK(esp_timer_create(&cfg, &_timer_on), return false);
-  };
+  if (_timer_on == nullptr) timerCreate();
   if (_timer_on != nullptr) {
     if (esp_timer_is_active(_timer_on)) {
       esp_timer_stop(_timer_on);
@@ -182,12 +299,39 @@ bool rLoadController::loadSetTimer(uint32_t duration_ms)
   return false;
 }
 
+bool rLoadController::timerCreate()
+{
+  if (_timer_on == nullptr) {
+    esp_timer_create_args_t cfg;
+    memset(&cfg, 0, sizeof(esp_timer_create_args_t));
+    cfg.name = "load_ctrl_on";
+    cfg.callback = loadControllerTimerEnd;
+    cfg.arg = this;
+    RE_OK_CHECK(esp_timer_create(&cfg, &_timer_on), return false);
+  };
+  return true;
+}
+
 bool rLoadController::timerIsActive()
 {
   return (_timer_on != nullptr) && esp_timer_is_active(_timer_on);
 }
 
 bool rLoadController::timerStop()
+{
+  if (_timer_on != nullptr) {
+    if (esp_timer_is_active(_timer_on)) {
+      esp_timer_stop(_timer_on);
+    };
+    if (_timer_free) {
+      RE_OK_CHECK(esp_timer_delete(_timer_on), return false);
+      _timer_on = nullptr;
+    };
+  };
+  return true;
+}
+
+bool rLoadController::timerFree()
 {
   if (_timer_on != nullptr) {
     if (esp_timer_is_active(_timer_on)) {
@@ -681,16 +825,18 @@ void rLoadController::countersTimeEventHandler(int32_t event_id, void* event_dat
 // -----------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------
 
-rLoadGpioController::rLoadGpioController(uint8_t pin, bool level_on, bool use_pullup, const char* nvs_space,
+rLoadGpioController::rLoadGpioController(uint8_t pin, bool level_on, bool use_pullup, bool use_timer, const char* nvs_space,
+  uint32_t* cycle_duration, uint32_t* cycle_interval, timeintv_t cycle_type,
   cb_load_change_t cb_gpio_before, cb_load_change_t cb_gpio_after, cb_load_change_t cb_state_changed, 
   cb_load_publish_t cb_mqtt_publish)
-:rLoadController(pin, level_on, use_pullup, nvs_space, 
+:rLoadController(pin, level_on, use_pullup, use_timer, nvs_space, 
+  cycle_duration, cycle_interval, cycle_type,
   cb_gpio_before, cb_gpio_after, cb_state_changed, cb_mqtt_publish)
 {
 }
 
-rLoadGpioController::rLoadGpioController(uint8_t pin, bool level_on, bool use_pullup, const char* nvs_space)
-:rLoadController(pin, level_on, use_pullup, nvs_space, nullptr, nullptr, nullptr, nullptr)
+rLoadGpioController::rLoadGpioController(uint8_t pin, bool level_on, bool use_pullup, bool use_timer, const char* nvs_space)
+:rLoadController(pin, level_on, use_pullup, use_timer, nvs_space, nullptr, nullptr, TI_MILLISECONDS, nullptr, nullptr, nullptr, nullptr)
 {
 }
 
@@ -721,20 +867,22 @@ bool rLoadGpioController::loadSetStateGPIO(bool physical_level)
 // -----------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------
 
-rLoadIoExpController::rLoadIoExpController(uint8_t pin, bool level_on, bool use_pullup, const char* nvs_space,
+rLoadIoExpController::rLoadIoExpController(uint8_t pin, bool level_on, bool use_pullup, bool use_timer, const char* nvs_space,
+  uint32_t* cycle_duration, uint32_t* cycle_interval, timeintv_t cycle_type,
   cb_load_gpio_init_t cb_gpio_init, cb_load_gpio_change_t cb_gpio_change,
   cb_load_change_t cb_gpio_before, cb_load_change_t cb_gpio_after, cb_load_change_t cb_state_changed, 
   cb_load_publish_t cb_mqtt_publish)
-:rLoadController(pin, level_on, use_pullup, nvs_space, 
+:rLoadController(pin, level_on, use_pullup, use_timer, nvs_space, 
+  cycle_duration, cycle_interval, cycle_type,
   cb_gpio_before, cb_gpio_after, cb_state_changed, cb_mqtt_publish)
 {
   _gpio_init = cb_gpio_init;
   _gpio_change = cb_gpio_change;
 }
 
-rLoadIoExpController::rLoadIoExpController(uint8_t pin, bool level_on, bool use_pullup, const char* nvs_space,
+rLoadIoExpController::rLoadIoExpController(uint8_t pin, bool level_on, bool use_pullup, bool use_timer, const char* nvs_space,
   cb_load_gpio_init_t cb_gpio_init, cb_load_gpio_change_t cb_gpio_change)
-:rLoadController(pin, level_on, use_pullup, nvs_space, nullptr, nullptr, nullptr, nullptr)
+:rLoadController(pin, level_on, use_pullup, use_timer, nvs_space, nullptr, nullptr, TI_MILLISECONDS, nullptr, nullptr, nullptr, nullptr)
 {
   _gpio_init = cb_gpio_init;
   _gpio_change = cb_gpio_change;
