@@ -56,8 +56,8 @@ class rLoadController;
 
 typedef bool (*cb_load_publish_t) (rLoadController *ctrl, char* topic, char* payload, bool free_topic, bool free_payload);
 typedef void (*cb_load_change_t) (rLoadController *ctrl, bool state, time_t duration);
-typedef bool (*cb_load_gpio_init_t) (rLoadController *ctrl, uint8_t pin, bool level_on, bool use_pullup);
-typedef bool (*cb_load_gpio_change_t) (rLoadController *ctrl, uint8_t pin, bool physical_level);
+typedef bool (*cb_load_gpio_init_t) (rLoadController *ctrl, uint8_t pin, uint8_t level_on);
+typedef bool (*cb_load_gpio_change_t) (rLoadController *ctrl, uint8_t pin, uint8_t physical_level);
 
 #ifdef __cplusplus
 extern "C" {
@@ -65,7 +65,7 @@ extern "C" {
 
 class rLoadController {
   public:
-    rLoadController(uint8_t pin, bool level_on, bool use_pullup, bool use_timer, const char* nvs_space,
+    rLoadController(uint8_t pin, uint8_t level_on, bool use_timer, const char* nvs_space,
       uint32_t* cycle_duration, uint32_t* cycle_interval, timeintv_t cycle_type,
       cb_load_change_t cb_gpio_before, cb_load_change_t cb_gpio_after, cb_load_change_t cb_state_changed, 
       cb_load_publish_t cb_mqtt_publish);
@@ -115,11 +115,10 @@ class rLoadController {
     void setCallbacks(cb_load_change_t cb_gpio_before, cb_load_change_t cb_gpio_after, cb_load_change_t cb_state_changed);
   protected:
     uint8_t     _pin = 0;                       // Pin number
-    bool        _level_on = true;               // Output level at which the load is considered to be on
-    bool        _use_pullup = true;             // Use internal pin pullup
+    uint8_t     _level_on = 0x01;               // Output level at which the load is considered to be on
 
     virtual bool loadInitGPIO() = 0;
-    virtual bool loadSetStateGPIO(bool physical_level) = 0; 
+    virtual bool loadSetStateGPIO(uint8_t physical_level) = 0; 
   private:
     bool        _state = false;                 // Current load state
     time_t      _last_on = 0;                   // The last time the load was turned on
@@ -154,28 +153,33 @@ class rLoadController {
 
 class rLoadGpioController: public rLoadController {
   public:
-    rLoadGpioController(uint8_t pin, bool level_on, bool use_pullup, bool use_timer, const char* nvs_space,
+    rLoadGpioController(uint8_t pin, uint8_t level_on, bool use_timer, const char* nvs_space,
       uint32_t* cycle_duration, uint32_t* cycle_interval, timeintv_t cycle_type,
       cb_load_change_t cb_gpio_before, cb_load_change_t cb_gpio_after, cb_load_change_t cb_state_changed, 
       cb_load_publish_t cb_mqtt_publish);
-    rLoadGpioController(uint8_t pin, bool level_on, bool use_pullup, bool use_timer, const char* nvs_space);
+    rLoadGpioController(uint8_t pin, uint8_t level_on, bool use_timer, const char* nvs_space);
+    rLoadGpioController(uint8_t pin, uint8_t level_on, bool use_timer, const char* nvs_space, 
+      cb_load_change_t cb_state_changed, cb_load_publish_t cb_mqtt_publish);
   protected:
     bool loadInitGPIO() override;
-    bool loadSetStateGPIO(bool physical_level) override; 
+    bool loadSetStateGPIO(uint8_t physical_level) override; 
 };
 
 class rLoadIoExpController: public rLoadController {
   public:
-    rLoadIoExpController(uint8_t pin, bool level_on, bool use_pullup, bool use_timer, const char* nvs_space,
+    rLoadIoExpController(uint8_t pin, uint8_t level_on, bool use_timer, const char* nvs_space,
       uint32_t* cycle_duration, uint32_t* cycle_interval, timeintv_t cycle_type,
       cb_load_gpio_init_t cb_gpio_init, cb_load_gpio_change_t cb_gpio_change,
       cb_load_change_t cb_gpio_before, cb_load_change_t cb_gpio_after, cb_load_change_t cb_state_changed, 
       cb_load_publish_t cb_mqtt_publish);
-    rLoadIoExpController(uint8_t pin, bool level_on, bool use_pullup, bool use_timer, const char* nvs_space,
+    rLoadIoExpController(uint8_t pin, uint8_t level_on, bool use_timer, const char* nvs_space,
       cb_load_gpio_init_t cb_gpio_init, cb_load_gpio_change_t cb_gpio_change);
+    rLoadIoExpController(uint8_t pin, uint8_t level_on, bool use_timer, const char* nvs_space,
+      cb_load_gpio_init_t cb_gpio_init, cb_load_gpio_change_t cb_gpio_change,
+      cb_load_change_t cb_state_changed, cb_load_publish_t cb_mqtt_publish);
   protected:
     bool loadInitGPIO() override;
-    bool loadSetStateGPIO(bool physical_level) override; 
+    bool loadSetStateGPIO(uint8_t physical_level) override; 
   private:
     cb_load_gpio_init_t _gpio_init = nullptr;
     cb_load_gpio_change_t _gpio_change = nullptr;
