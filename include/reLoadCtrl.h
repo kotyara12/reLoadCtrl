@@ -126,6 +126,7 @@ class rLoadController {
     uint8_t*    _period_start = nullptr;        // Day of month at the beginning of the billing period (for example, sending meter readings)
     uint32_t*   _cycle_duration = nullptr;      // If this value is set, the load will turn on not constantly, but with pulses with a given duration
     uint32_t*   _cycle_interval = nullptr;      // If this value is set, the load will turn on not constantly, but with pulses with a given interval
+    int32_t     _cycle_count = -1;              // Switch-on cycle counter in pulse mode
     timeintv_t  _cycle_type = TI_MILLISECONDS;  // Dimensions of cycle time intervals
     bool        _cycle_state = false;           // Current cycle state
     re_load_counters_t  _counters;              // Counters of the number of load switching

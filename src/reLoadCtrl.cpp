@@ -33,6 +33,7 @@ rLoadController::rLoadController(uint8_t pin, uint8_t level_on, bool use_timer, 
   _cycle_duration = cycle_duration;
   _cycle_interval = cycle_interval;
   _cycle_type = cycle_type;
+  _cycle_count = -1;
 
    // Reset pointers
   _period_start = nullptr;
@@ -105,9 +106,11 @@ bool rLoadController::loadSetState(bool new_state, bool forced, bool publish)
     bool change_ok = false;
     if ((_cycle_duration) && (*_cycle_duration > 0) && (_cycle_interval) && (*_cycle_interval > 0)) {
       // Activate cycle timer
+      _cycle_count = 0;
       change_ok = cycleSetCyclePriv(new_state);
     } else {
       // Set physical level to GPIO
+      _cycle_count = -1;
       cycleFree();
       change_ok = loadSetStatePriv(new_state);
     };
@@ -213,6 +216,7 @@ bool rLoadController::cycleToggle()
     // Switching the load
     bool new_state = !_cycle_state;
     if (loadSetStatePriv(new_state)) {
+      if (new_state) _cycle_count++;
       // Calculate timer duration
       uint64_t duration = 1000 * (uint64_t)(new_state ? *_cycle_duration : *_cycle_interval);
       switch (_cycle_type) {
@@ -467,8 +471,13 @@ char* rLoadController::getJSON()
   char* _json_durations = getDurationsJSON();
   
   if ((_json_time) && (_json_counters) && (_json_durations)) {
-    _json = malloc_stringf("{\"" CONFIG_LOADCTRL_STATUS "\":%d,\"" CONFIG_LOADCTRL_TIMESTAMP "\":%s,\"" CONFIG_LOADCTRL_DURATIONS "\":%s,\"" CONFIG_LOADCTRL_COUNTERS "\":%s}",
-      _state, _json_time, _json_durations, _json_counters);
+    if (_cycle_count > -1) {
+      _json = malloc_stringf("{\"" CONFIG_LOADCTRL_STATUS "\":%d,\"" CONFIG_LOADCTRL_CYCLES "\":%d,\"" CONFIG_LOADCTRL_TIMESTAMP "\":%s,\"" CONFIG_LOADCTRL_DURATIONS "\":%s,\"" CONFIG_LOADCTRL_COUNTERS "\":%s}",
+        _state, _cycle_count, _json_time, _json_durations, _json_counters);
+    } else {
+      _json = malloc_stringf("{\"" CONFIG_LOADCTRL_STATUS "\":%d,\"" CONFIG_LOADCTRL_TIMESTAMP "\":%s,\"" CONFIG_LOADCTRL_DURATIONS "\":%s,\"" CONFIG_LOADCTRL_COUNTERS "\":%s}",
+        _state, _json_time, _json_durations, _json_counters);
+    };
   };
 
   if (_json_time) free(_json_time);
@@ -496,7 +505,7 @@ void rLoadController::countersNvsRestore()
     uint32_t daysNvs = daysNow;
     nvs_handle_t nvs_handle;
     if (nvsOpen(_nvs_space, NVS_READONLY, &nvs_handle)) {
-      nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_DAYS, &daysNvs);
+      RE_ERROR_LOG(nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_DAYS, &daysNvs));
       nvs_close(nvs_handle);
     };
 
@@ -507,17 +516,17 @@ void rLoadController::countersNvsRestore()
       nvs_handle_t nvs_handle;
       if (nvsOpen(nmsp_cnt, NVS_READONLY, &nvs_handle)) {
         _nvsCntEnabled = true;
-        nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_TOTAL, &_nvsCnt.cntTotal);
-        nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_TODAY, &_nvsCnt.cntToday);
-        nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_YESTERDAY, &_nvsCnt.cntYesterday);
-        nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_WEEK_CURR, &_nvsCnt.cntWeekCurr);
-        nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_WEEK_PREV, &_nvsCnt.cntWeekPrev);
-        nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_MONTH_CURR, &_nvsCnt.cntMonthCurr);
-        nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_MONTH_PREV, &_nvsCnt.cntMonthPrev);
-        nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_PERIOD_CURR, &_nvsCnt.cntPeriodCurr);
-        nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_PERIOD_PREV, &_nvsCnt.cntPeriodPrev);
-        nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_YEAR_CURR, &_nvsCnt.cntYearCurr);
-        nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_YEAR_PREV, &_nvsCnt.cntYearPrev);
+        RE_ERROR_LOG(nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_TOTAL, &_nvsCnt.cntTotal));
+        RE_ERROR_LOG(nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_TODAY, &_nvsCnt.cntToday));
+        RE_ERROR_LOG(nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_YESTERDAY, &_nvsCnt.cntYesterday));
+        RE_ERROR_LOG(nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_WEEK_CURR, &_nvsCnt.cntWeekCurr));
+        RE_ERROR_LOG(nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_WEEK_PREV, &_nvsCnt.cntWeekPrev));
+        RE_ERROR_LOG(nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_MONTH_CURR, &_nvsCnt.cntMonthCurr));
+        RE_ERROR_LOG(nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_MONTH_PREV, &_nvsCnt.cntMonthPrev));
+        RE_ERROR_LOG(nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_PERIOD_CURR, &_nvsCnt.cntPeriodCurr));
+        RE_ERROR_LOG(nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_PERIOD_PREV, &_nvsCnt.cntPeriodPrev));
+        RE_ERROR_LOG(nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_YEAR_CURR, &_nvsCnt.cntYearCurr));
+        RE_ERROR_LOG(nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_YEAR_PREV, &_nvsCnt.cntYearPrev));
         nvs_close(nvs_handle);
       };
       free(nmsp_cnt);
@@ -530,18 +539,18 @@ void rLoadController::countersNvsRestore()
       nvs_handle_t nvs_handle;
       if (nvsOpen(nmsp_dur, NVS_READONLY, &nvs_handle)) {
         _nvsDurEnabled = true;
-        nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_LAST, &_nvsDur.durLast);
-        nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_TOTAL, &_nvsDur.durTotal);
-        nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_TODAY, &_nvsDur.durToday);
-        nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_YESTERDAY, &_nvsDur.durYesterday);
-        nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_WEEK_CURR, &_nvsDur.durWeekCurr);
-        nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_WEEK_PREV, &_nvsDur.durWeekPrev);
-        nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_MONTH_CURR, &_nvsDur.durMonthCurr);
-        nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_MONTH_PREV, &_nvsDur.durMonthPrev);
-        nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_PERIOD_CURR, &_nvsDur.durPeriodCurr);
-        nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_PERIOD_PREV, &_nvsDur.durPeriodPrev);
-        nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_YEAR_CURR, &_nvsDur.durYearCurr);
-        nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_YEAR_PREV, &_nvsDur.durYearPrev);
+        RE_ERROR_LOG(nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_LAST, &_nvsDur.durLast));
+        RE_ERROR_LOG(nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_TOTAL, &_nvsDur.durTotal));
+        RE_ERROR_LOG(nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_TODAY, &_nvsDur.durToday));
+        RE_ERROR_LOG(nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_YESTERDAY, &_nvsDur.durYesterday));
+        RE_ERROR_LOG(nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_WEEK_CURR, &_nvsDur.durWeekCurr));
+        RE_ERROR_LOG(nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_WEEK_PREV, &_nvsDur.durWeekPrev));
+        RE_ERROR_LOG(nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_MONTH_CURR, &_nvsDur.durMonthCurr));
+        RE_ERROR_LOG(nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_MONTH_PREV, &_nvsDur.durMonthPrev));
+        RE_ERROR_LOG(nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_PERIOD_CURR, &_nvsDur.durPeriodCurr));
+        RE_ERROR_LOG(nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_PERIOD_PREV, &_nvsDur.durPeriodPrev));
+        RE_ERROR_LOG(nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_YEAR_CURR, &_nvsDur.durYearCurr));
+        RE_ERROR_LOG(nvs_get_u32(nvs_handle, CONFIG_LOADCTRL_YEAR_PREV, &_nvsDur.durYearPrev));
         nvs_close(nvs_handle);
       };
       free(nmsp_dur);
@@ -718,8 +727,8 @@ void rLoadController::countersNvsStore()
     if (nvsOpen(_nvs_space, NVS_READWRITE, &nvs_handle)) {
       // Number of days since UNIX epoch, discarding time
       uint32_t days = (uint32_t)(time(nullptr) / 86400);
-      nvs_set_u32(nvs_handle, CONFIG_LOADCTRL_DAYS, days);
-      nvs_commit(nvs_handle);
+      RE_ERROR_LOG(nvs_set_u32(nvs_handle, CONFIG_LOADCTRL_DAYS, days));
+      RE_ERROR_LOG(nvs_commit(nvs_handle));
       nvs_close(nvs_handle);
     };
 
@@ -727,18 +736,18 @@ void rLoadController::countersNvsStore()
     if (nmsp_cnt) {
       nvs_handle_t nvs_handle;
       if (nvsOpen(nmsp_cnt, NVS_READWRITE, &nvs_handle)) {
-        nvs_set_u32(nvs_handle, CONFIG_LOADCTRL_TOTAL, _counters.cntTotal);
-        nvs_set_u32(nvs_handle, CONFIG_LOADCTRL_TODAY, _counters.cntToday);
-        nvs_set_u32(nvs_handle, CONFIG_LOADCTRL_YESTERDAY, _counters.cntYesterday);
-        nvs_set_u32(nvs_handle, CONFIG_LOADCTRL_WEEK_CURR, _counters.cntWeekCurr);
-        nvs_set_u32(nvs_handle, CONFIG_LOADCTRL_WEEK_PREV, _counters.cntWeekPrev);
-        nvs_set_u32(nvs_handle, CONFIG_LOADCTRL_MONTH_CURR, _counters.cntMonthCurr);
-        nvs_set_u32(nvs_handle, CONFIG_LOADCTRL_MONTH_PREV, _counters.cntMonthPrev);
-        nvs_set_u32(nvs_handle, CONFIG_LOADCTRL_PERIOD_CURR, _counters.cntPeriodCurr);
-        nvs_set_u32(nvs_handle, CONFIG_LOADCTRL_PERIOD_PREV, _counters.cntPeriodPrev);
-        nvs_set_u32(nvs_handle, CONFIG_LOADCTRL_YEAR_CURR, _counters.cntYearCurr);
-        nvs_set_u32(nvs_handle, CONFIG_LOADCTRL_YEAR_PREV, _counters.cntYearPrev);
-        nvs_commit(nvs_handle);
+        RE_ERROR_LOG(nvs_set_u32(nvs_handle, CONFIG_LOADCTRL_TOTAL, _counters.cntTotal));
+        RE_ERROR_LOG(nvs_set_u32(nvs_handle, CONFIG_LOADCTRL_TODAY, _counters.cntToday));
+        RE_ERROR_LOG(nvs_set_u32(nvs_handle, CONFIG_LOADCTRL_YESTERDAY, _counters.cntYesterday));
+        RE_ERROR_LOG(nvs_set_u32(nvs_handle, CONFIG_LOADCTRL_WEEK_CURR, _counters.cntWeekCurr));
+        RE_ERROR_LOG(nvs_set_u32(nvs_handle, CONFIG_LOADCTRL_WEEK_PREV, _counters.cntWeekPrev));
+        RE_ERROR_LOG(nvs_set_u32(nvs_handle, CONFIG_LOADCTRL_MONTH_CURR, _counters.cntMonthCurr));
+        RE_ERROR_LOG(nvs_set_u32(nvs_handle, CONFIG_LOADCTRL_MONTH_PREV, _counters.cntMonthPrev));
+        RE_ERROR_LOG(nvs_set_u32(nvs_handle, CONFIG_LOADCTRL_PERIOD_CURR, _counters.cntPeriodCurr));
+        RE_ERROR_LOG(nvs_set_u32(nvs_handle, CONFIG_LOADCTRL_PERIOD_PREV, _counters.cntPeriodPrev));
+        RE_ERROR_LOG(nvs_set_u32(nvs_handle, CONFIG_LOADCTRL_YEAR_CURR, _counters.cntYearCurr));
+        RE_ERROR_LOG(nvs_set_u32(nvs_handle, CONFIG_LOADCTRL_YEAR_PREV, _counters.cntYearPrev));
+        RE_ERROR_LOG(nvs_commit(nvs_handle));
         nvs_close(nvs_handle);
       };
       free(nmsp_cnt);
@@ -748,19 +757,19 @@ void rLoadController::countersNvsStore()
     if (nmsp_dur) {
       nvs_handle_t nvs_handle;
       if (nvsOpen(nmsp_dur, NVS_READWRITE, &nvs_handle)) {
-        nvs_set_u32(nvs_handle, CONFIG_LOADCTRL_LAST, _durations.durLast);
-        nvs_set_u32(nvs_handle, CONFIG_LOADCTRL_TOTAL, _durations.durTotal);
-        nvs_set_u32(nvs_handle, CONFIG_LOADCTRL_TODAY, _durations.durToday);
-        nvs_set_u32(nvs_handle, CONFIG_LOADCTRL_YESTERDAY, _durations.durYesterday);
-        nvs_set_u32(nvs_handle, CONFIG_LOADCTRL_WEEK_CURR, _durations.durWeekCurr);
-        nvs_set_u32(nvs_handle, CONFIG_LOADCTRL_WEEK_PREV, _durations.durWeekPrev);
-        nvs_set_u32(nvs_handle, CONFIG_LOADCTRL_MONTH_CURR, _durations.durMonthCurr);
-        nvs_set_u32(nvs_handle, CONFIG_LOADCTRL_MONTH_PREV, _durations.durMonthPrev);
-        nvs_set_u32(nvs_handle, CONFIG_LOADCTRL_PERIOD_CURR, _durations.durPeriodCurr);
-        nvs_set_u32(nvs_handle, CONFIG_LOADCTRL_PERIOD_PREV, _durations.durPeriodPrev);
-        nvs_set_u32(nvs_handle, CONFIG_LOADCTRL_YEAR_CURR, _durations.durYearCurr);
-        nvs_set_u32(nvs_handle, CONFIG_LOADCTRL_YEAR_PREV, _durations.durYearPrev);
-        nvs_commit(nvs_handle);
+        RE_ERROR_LOG(nvs_set_u32(nvs_handle, CONFIG_LOADCTRL_LAST, _durations.durLast));
+        RE_ERROR_LOG(nvs_set_u32(nvs_handle, CONFIG_LOADCTRL_TOTAL, _durations.durTotal));
+        RE_ERROR_LOG(nvs_set_u32(nvs_handle, CONFIG_LOADCTRL_TODAY, _durations.durToday));
+        RE_ERROR_LOG(nvs_set_u32(nvs_handle, CONFIG_LOADCTRL_YESTERDAY, _durations.durYesterday));
+        RE_ERROR_LOG(nvs_set_u32(nvs_handle, CONFIG_LOADCTRL_WEEK_CURR, _durations.durWeekCurr));
+        RE_ERROR_LOG(nvs_set_u32(nvs_handle, CONFIG_LOADCTRL_WEEK_PREV, _durations.durWeekPrev));
+        RE_ERROR_LOG(nvs_set_u32(nvs_handle, CONFIG_LOADCTRL_MONTH_CURR, _durations.durMonthCurr));
+        RE_ERROR_LOG(nvs_set_u32(nvs_handle, CONFIG_LOADCTRL_MONTH_PREV, _durations.durMonthPrev));
+        RE_ERROR_LOG(nvs_set_u32(nvs_handle, CONFIG_LOADCTRL_PERIOD_CURR, _durations.durPeriodCurr));
+        RE_ERROR_LOG(nvs_set_u32(nvs_handle, CONFIG_LOADCTRL_PERIOD_PREV, _durations.durPeriodPrev));
+        RE_ERROR_LOG(nvs_set_u32(nvs_handle, CONFIG_LOADCTRL_YEAR_CURR, _durations.durYearCurr));
+        RE_ERROR_LOG(nvs_set_u32(nvs_handle, CONFIG_LOADCTRL_YEAR_PREV, _durations.durYearPrev));
+        RE_ERROR_LOG(nvs_commit(nvs_handle));
         nvs_close(nvs_handle);
       };
       free(nmsp_dur);
