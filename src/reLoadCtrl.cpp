@@ -106,7 +106,7 @@ bool rLoadController::loadSetState(bool new_state, bool forced, bool publish)
     bool change_ok = false;
     if ((_cycle_duration) && (*_cycle_duration > 0) && (_cycle_interval) && (*_cycle_interval > 0)) {
       // Activate cycle timer
-      _cycle_count = 0;
+      if (new_state) _cycle_count = 0;
       change_ok = cycleSetCyclePriv(new_state);
     } else {
       // Set physical level to GPIO
