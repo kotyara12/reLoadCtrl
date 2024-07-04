@@ -425,6 +425,8 @@ bool rLoadController::mqttPublish()
 // -------------------------------------------------------- JSON ---------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------
 
+#if CONFIG_LOADCTRL_TIMESTAMP_ENABLED
+
 char* rLoadController::getTimestampsJSON()
 {
   char _time_on[CONFIG_LOADCTRL_TIMESTAMP_BUF_SIZE];
@@ -436,6 +438,10 @@ char* rLoadController::getTimestampsJSON()
   return malloc_stringf("{\"" CONFIG_LOADCTRL_ON "\":\"%s\",\"" CONFIG_LOADCTRL_OFF "\":\"%s\"}", _time_on, _time_off);
 }
 
+#endif // CONFIG_LOADCTRL_TIMESTAMP_ENABLED
+
+#if CONFIG_LOADCTRL_COUNTERS_ENABLED
+
 char* rLoadController::getCountersJSON()
 {
   return malloc_stringf("{\"" CONFIG_LOADCTRL_TOTAL "\":%d,\"" CONFIG_LOADCTRL_TODAY "\":%d,\"" CONFIG_LOADCTRL_YESTERDAY "\":%d,\"" CONFIG_LOADCTRL_WEEK_CURR "\":%d,\"" CONFIG_LOADCTRL_WEEK_PREV "\":%d,\"" CONFIG_LOADCTRL_MONTH_CURR "\":%d,\"" CONFIG_LOADCTRL_MONTH_PREV "\":%d,\"" CONFIG_LOADCTRL_PERIOD_CURR "\":%d,\"" CONFIG_LOADCTRL_PERIOD_PREV "\":%d,\"" CONFIG_LOADCTRL_YEAR_CURR "\":%d,\"" CONFIG_LOADCTRL_YEAR_PREV "\":%d}", 
@@ -446,6 +452,10 @@ char* rLoadController::getCountersJSON()
     _counters.cntPeriodCurr, _counters.cntPeriodPrev, 
     _counters.cntYearCurr, _counters.cntYearPrev);
 }
+
+#endif // CONFIG_LOADCTRL_COUNTERS_ENABLED
+
+#if CONFIG_LOADCTRL_DURATIONS_ENABLED
 
 char* rLoadController::getDurationsJSON()
 {
@@ -462,27 +472,40 @@ char* rLoadController::getDurationsJSON()
     _durations.durYearCurr + durCurr, _durations.durYearPrev);
 }
 
+#endif // CONFIG_LOADCTRL_DURATIONS_ENABLED
+
 char* rLoadController::getJSON()
 {
-  char* _json = nullptr;
-
-  char* _json_time = getTimestampsJSON();
-  char* _json_counters = getCountersJSON();
-  char* _json_durations = getDurationsJSON();
-  
-  if ((_json_time) && (_json_counters) && (_json_durations)) {
-    if (_cycle_count > -1) {
-      _json = malloc_stringf("{\"" CONFIG_LOADCTRL_STATUS "\":%d,\"" CONFIG_LOADCTRL_CYCLES "\":%d,\"" CONFIG_LOADCTRL_TIMESTAMP "\":%s,\"" CONFIG_LOADCTRL_DURATIONS "\":%s,\"" CONFIG_LOADCTRL_COUNTERS "\":%s}",
-        _state, _cycle_count, _json_time, _json_durations, _json_counters);
-    } else {
-      _json = malloc_stringf("{\"" CONFIG_LOADCTRL_STATUS "\":%d,\"" CONFIG_LOADCTRL_TIMESTAMP "\":%s,\"" CONFIG_LOADCTRL_DURATIONS "\":%s,\"" CONFIG_LOADCTRL_COUNTERS "\":%s}",
-        _state, _json_time, _json_durations, _json_counters);
-    };
+  char* _json = malloc_stringf("{\"" CONFIG_LOADCTRL_STATUS "\":%d", _state);
+  if (_cycle_count > -1) {
+    _json = concat_strings(_json, malloc_stringf(",\"" CONFIG_LOADCTRL_CYCLES "\":%d", _cycle_count));
   };
 
-  if (_json_time) free(_json_time);
-  if (_json_counters) free(_json_counters);
-  if (_json_durations) free(_json_durations);
+  #if CONFIG_LOADCTRL_TIMESTAMP_ENABLED
+    char * _json_time = getTimestampsJSON();
+    if (_json_time) {
+      _json = concat_strings(_json, malloc_stringf(",\"" CONFIG_LOADCTRL_TIMESTAMP "\":%s", _json_time));
+      if (_json_time) free(_json_time);
+    };
+  #endif // CONFIG_LOADCTRL_TIMESTAMP_ENABLED
+  
+  #if CONFIG_LOADCTRL_DURATIONS_ENABLED
+    char* _json_durations = getDurationsJSON();
+    if (_json_durations) {
+      _json = concat_strings(_json, malloc_stringf(",\"" CONFIG_LOADCTRL_DURATIONS "\":%s", _json_durations));
+      if (_json_durations) free(_json_durations);
+    };
+  #endif // CONFIG_LOADCTRL_DURATIONS_ENABLED
+
+  #if CONFIG_LOADCTRL_COUNTERS_ENABLED
+    char* _json_counters = getCountersJSON();
+    if (_json_counters) {
+      _json = concat_strings(_json, malloc_stringf(",\"" CONFIG_LOADCTRL_COUNTERS "\":%s", _json_counters));
+      if (_json_counters) free(_json_counters);
+    };
+  #endif // CONFIG_LOADCTRL_COUNTERS_ENABLED
+  
+  _json = concat_strings(_json, malloc_string("}"));
 
   return _json;
 }
